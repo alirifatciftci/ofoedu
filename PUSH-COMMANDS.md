@@ -35,3 +35,4 @@ git push -u origin main
 2. Yeni token oluşturun (repo yetkisi verin)
 3. Push yaparken username olarak GitHub kullanıcı adınızı, password olarak token'ı kullanın
 
+

@@ -63,3 +63,9 @@ logs/
 
 # bolt
 .bolt/
+
+# temporary scripts
+fix-and-push.ps1
+push-to-github.bat
+push-to-github.ps1
+PUSH-COMMANDS.md

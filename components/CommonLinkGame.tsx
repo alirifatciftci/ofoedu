@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import {
   View,
   Text,
@@ -7,11 +7,13 @@ import {
   StyleSheet,
   ActivityIndicator,
   ScrollView,
+  KeyboardAvoidingView,
+  Platform,
   FlatList,
 } from 'react-native';
 import { supabase } from '@/lib/supabase';
-import { CommonLinkGame as CommonLinkGameType, Club } from '@/types/database';
-import { Link2, CheckCircle, XCircle } from 'lucide-react-native';
+import { compareTurkish, startsWithTurkish } from '@/lib/utils';
+import { Link2, CheckCircle, XCircle, RefreshCw } from 'lucide-react-native';
 
 interface PlayerWithClubs {
   id: string;
@@ -20,9 +22,14 @@ interface PlayerWithClubs {
   nationality: string;
 }
 
+interface Club {
+  id: string;
+  name: string;
+  country: string;
+}
+
 export default function CommonLinkGame() {
   const [loading, setLoading] = useState(true);
-  const [game, setGame] = useState<CommonLinkGameType | null>(null);
   const [club1, setClub1] = useState<Club | null>(null);
   const [club2, setClub2] = useState<Club | null>(null);
   const [validPlayers, setValidPlayers] = useState<PlayerWithClubs[]>([]);
@@ -30,79 +37,136 @@ export default function CommonLinkGame() {
   const [guess, setGuess] = useState('');
   const [attempts, setAttempts] = useState(0);
   const [message, setMessage] = useState('');
+  const [suggestions, setSuggestions] = useState<PlayerWithClubs[]>([]);
+  const [currentClubPair, setCurrentClubPair] = useState<{
+    club1Id: string;
+    club2Id: string;
+  } | null>(null);
+  const scrollViewRef = useRef<ScrollView>(null);
+  const inputRef = useRef<TextInput>(null);
 
   useEffect(() => {
     loadGame();
   }, []);
 
-  async function loadGame() {
+  async function loadGame(excludeClubPair: { club1Id: string; club2Id: string } | null = null) {
     try {
       setLoading(true);
 
-      const { data: games, error: gamesError } = await supabase
-        .from('common_link_games')
-        .select('*')
-        .eq('is_active', true)
-        .limit(1)
-        .maybeSingle();
+      // Tüm kulüpleri çek
+      const { data: allClubs, error: clubsError } = await supabase
+        .from('clubs')
+        .select('id, name, country');
 
-      if (gamesError) throw gamesError;
-      if (!games) {
+      if (clubsError) throw clubsError;
+      if (!allClubs || allClubs.length < 2) {
         setLoading(false);
         return;
       }
 
-      setGame(games);
+      // Tüm kariyer geçmişini çek
+      const { data: allHistory, error: historyError } = await supabase
+        .from('player_career_history')
+        .select('player_id, club_id');
 
-      const { data: club1Data, error: club1Error } = await supabase
-        .from('clubs')
-        .select('*')
-        .eq('id', games.club_1_id)
-        .maybeSingle();
+      if (historyError) throw historyError;
+      if (!allHistory || allHistory.length === 0) {
+        setLoading(false);
+        return;
+      }
 
-      const { data: club2Data, error: club2Error } = await supabase
-        .from('clubs')
-        .select('*')
-        .eq('id', games.club_2_id)
-        .maybeSingle();
+      // Her kulüp için oyuncu setlerini oluştur
+      const clubPlayersMap = new Map<string, Set<string>>();
+      allClubs.forEach((club) => {
+        clubPlayersMap.set(
+          club.id,
+          new Set(
+            allHistory
+              .filter((h) => h.club_id === club.id)
+              .map((h) => h.player_id)
+          )
+        );
+      });
 
-      if (club1Error || club2Error) throw club1Error || club2Error;
+      // Ortak oyuncuları olan kulüp çiftlerini bul
+      const validPairs: Array<{ club1: Club; club2: Club; commonCount: number }> = [];
 
-      setClub1(club1Data);
-      setClub2(club2Data);
+      for (let i = 0; i < allClubs.length; i++) {
+        for (let j = i + 1; j < allClubs.length; j++) {
+          const club1 = allClubs[i];
+          const club2 = allClubs[j];
 
+          // Aynı kulübün kendisiyle eşleşmesini engelle
+          if (club1.id === club2.id) {
+            continue;
+          }
+
+          // Mevcut çifti hariç tut
+          if (
+            excludeClubPair &&
+            ((club1.id === excludeClubPair.club1Id &&
+              club2.id === excludeClubPair.club2Id) ||
+              (club1.id === excludeClubPair.club2Id &&
+                club2.id === excludeClubPair.club1Id))
+          ) {
+            continue;
+          }
+
+          const players1 = clubPlayersMap.get(club1.id) || new Set();
+          const players2 = clubPlayersMap.get(club2.id) || new Set();
+
+          // Ortak oyuncuları bul
+          const commonPlayers = Array.from(players1).filter((id) =>
+            players2.has(id)
+          );
+
+          if (commonPlayers.length > 0) {
+            validPairs.push({
+              club1,
+              club2,
+              commonCount: commonPlayers.length,
+            });
+          }
+        }
+      }
+
+      if (validPairs.length === 0) {
+        setLoading(false);
+        return;
+      }
+
+      // Rastgele bir çift seç
+      const randomIndex = Math.floor(Math.random() * validPairs.length);
+      const selectedPair = validPairs[randomIndex];
+
+      setClub1(selectedPair.club1);
+      setClub2(selectedPair.club2);
+      setCurrentClubPair({
+        club1Id: selectedPair.club1.id,
+        club2Id: selectedPair.club2.id,
+      });
+
+      // Ortak oyuncuları bul
+      const players1 = clubPlayersMap.get(selectedPair.club1.id) || new Set();
+      const players2 = clubPlayersMap.get(selectedPair.club2.id) || new Set();
+      const commonPlayerIds = Array.from(players1).filter((id) =>
+        players2.has(id)
+      );
+
+      // RPC function'ı dene
       const { data: playersData, error: playersError } = await supabase.rpc(
         'get_common_players',
         {
-          club1_id: games.club_1_id,
-          club2_id: games.club_2_id,
+          club1_id: selectedPair.club1.id,
+          club2_id: selectedPair.club2.id,
         }
       );
 
-      if (playersError) {
-        const { data: allHistory } = await supabase
-          .from('player_career_history')
-          .select('player_id, club_id');
-
-        const club1Players = new Set(
-          allHistory
-            ?.filter((h) => h.club_id === games.club_1_id)
-            .map((h) => h.player_id)
-        );
-
-        const club2Players = new Set(
-          allHistory
-            ?.filter((h) => h.club_id === games.club_2_id)
-            .map((h) => h.player_id)
-        );
-
-        const commonPlayerIds = Array.from(club1Players).filter((id) =>
-          club2Players.has(id)
-        );
-
+      if (playersError || !playersData || playersData.length === 0) {
+        // Fallback: manuel olarak bul
         const { data: players } = await supabase
           .from('players')
-          .select('id, name, position, nationality')
+          .select('id, name, "position", nationality')
           .in('id', commonPlayerIds);
 
         setValidPlayers(players || []);
@@ -117,12 +181,47 @@ export default function CommonLinkGame() {
     }
   }
 
+  function changeClubs() {
+    setFoundPlayers(new Set());
+    setGuess('');
+    setAttempts(0);
+    setMessage('');
+    loadGame(currentClubPair);
+  }
+
+  function handleInputFocus() {
+    // Input focus olduğunda scroll yap
+    setTimeout(() => {
+      scrollViewRef.current?.scrollToEnd({ animated: true });
+    }, 100);
+  }
+
+  function handleGuessChange(text: string) {
+    setGuess(text);
+    
+    if (text.trim().length > 0) {
+      const filtered = validPlayers.filter((player) =>
+        startsWithTurkish(player.name, text.trim())
+      );
+      setSuggestions(filtered.slice(0, 5)); // İlk 5 öneri
+    } else {
+      setSuggestions([]);
+    }
+  }
+
+  function selectSuggestion(playerName: string) {
+    setGuess(playerName);
+    setSuggestions([]);
+    inputRef.current?.blur();
+  }
+
   function checkGuess() {
-    const normalizedGuess = guess.trim().toLowerCase();
+    setSuggestions([]);
     setAttempts(attempts + 1);
 
-    const matchedPlayer = validPlayers.find(
-      (p) => p.name.toLowerCase() === normalizedGuess
+    // Türkçe karakter toleransı ile eşleşen oyuncuyu bul
+    const matchedPlayer = validPlayers.find((p) =>
+      compareTurkish(guess.trim(), p.name)
     );
 
     if (matchedPlayer && !foundPlayers.has(matchedPlayer.id)) {
@@ -145,17 +244,17 @@ export default function CommonLinkGame() {
   }
 
   async function saveStats(completed: boolean) {
-    if (!game) return;
+    if (!club1 || !club2) return;
 
     try {
       const score = completed
-        ? Math.max(0, 100 - Math.floor(attempts / foundPlayers.size) * 5)
+        ? Math.max(0, 100 - Math.floor(attempts / (foundPlayers.size || 1)) * 5)
         : foundPlayers.size * 10;
 
       await supabase.from('user_game_stats').insert({
         user_id: 'anonymous',
         game_type: 'common_link',
-        game_id: game.id,
+        game_id: `${club1.id}-${club2.id}`,
         completed: completed,
         attempts: attempts,
         score: score,
@@ -175,7 +274,7 @@ export default function CommonLinkGame() {
     setGuess('');
     setAttempts(0);
     setMessage('');
-    loadGame();
+    loadGame(currentClubPair);
   }
 
   if (loading) {
@@ -186,7 +285,7 @@ export default function CommonLinkGame() {
     );
   }
 
-  if (!game || !club1 || !club2) {
+  if (!club1 || !club2) {
     return (
       <View style={styles.centerContainer}>
         <Text style={styles.errorText}>No games available</Text>
@@ -197,11 +296,29 @@ export default function CommonLinkGame() {
   const isComplete = foundPlayers.size === validPlayers.length;
 
   return (
-    <ScrollView style={styles.container}>
-      <View style={styles.header}>
-        <Text style={styles.title}>Common Link</Text>
-        <Text style={styles.subtitle}>Find the connection</Text>
-      </View>
+    <KeyboardAvoidingView
+      style={styles.container}
+      behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+      keyboardVerticalOffset={Platform.OS === 'ios' ? 0 : 20}>
+      <ScrollView
+        ref={scrollViewRef}
+        style={styles.scrollView}
+        contentContainerStyle={styles.scrollContent}
+        keyboardShouldPersistTaps="handled">
+        <View style={styles.header}>
+          <View style={styles.headerTop}>
+            <Text style={styles.title}>Common Link</Text>
+            {!isComplete && (
+              <TouchableOpacity
+                style={styles.changeClubsButton}
+                onPress={changeClubs}>
+                <RefreshCw size={20} color="#3b82f6" />
+                <Text style={styles.changeClubsText}>Change Clubs</Text>
+              </TouchableOpacity>
+            )}
+          </View>
+          <Text style={styles.subtitle}>Find the connection</Text>
+        </View>
 
       <View style={styles.clubsContainer}>
         <View style={styles.clubCard}>
@@ -228,14 +345,40 @@ export default function CommonLinkGame() {
 
       {!isComplete && (
         <View style={styles.inputContainer}>
-          <TextInput
-            style={styles.input}
-            placeholder="Enter player name..."
-            value={guess}
-            onChangeText={setGuess}
-            autoCapitalize="words"
-            autoCorrect={false}
-          />
+          <View>
+            <TextInput
+              ref={inputRef}
+              style={styles.input}
+              placeholder="Enter player name..."
+              value={guess}
+              onChangeText={handleGuessChange}
+              autoCapitalize="words"
+              autoCorrect={false}
+              onFocus={handleInputFocus}
+              returnKeyType="done"
+              onSubmitEditing={checkGuess}
+            />
+            
+            {suggestions.length > 0 && (
+              <View style={styles.suggestionsContainer}>
+                <FlatList
+                  data={suggestions}
+                  keyExtractor={(item) => item.id}
+                  renderItem={({ item }) => (
+                    <TouchableOpacity
+                      style={styles.suggestionItem}
+                      onPress={() => selectSuggestion(item.name)}>
+                      <Text style={styles.suggestionText}>{item.name}</Text>
+                      <Text style={styles.suggestionDetails}>
+                        {item.position} • {item.nationality}
+                      </Text>
+                    </TouchableOpacity>
+                  )}
+                  scrollEnabled={false}
+                />
+              </View>
+            )}
+          </View>
 
           <View style={styles.buttonRow}>
             <TouchableOpacity
@@ -298,7 +441,8 @@ export default function CommonLinkGame() {
           </TouchableOpacity>
         </View>
       )}
-    </ScrollView>
+      </ScrollView>
+    </KeyboardAvoidingView>
   );
 }
 
@@ -306,6 +450,12 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
     backgroundColor: '#f9fafb',
+  },
+  scrollView: {
+    flex: 1,
+  },
+  scrollContent: {
+    flexGrow: 1,
   },
   centerContainer: {
     flex: 1,
@@ -318,6 +468,26 @@ const styles = StyleSheet.create({
     padding: 24,
     borderBottomWidth: 1,
     borderBottomColor: '#e5e7eb',
+  },
+  headerTop: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 4,
+  },
+  changeClubsButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#eff6ff',
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 6,
+    gap: 6,
+  },
+  changeClubsText: {
+    color: '#3b82f6',
+    fontSize: 14,
+    fontWeight: '600',
   },
   title: {
     fontSize: 28,
@@ -501,5 +671,33 @@ const styles = StyleSheet.create({
   errorText: {
     fontSize: 16,
     color: '#6b7280',
+  },
+  suggestionsContainer: {
+    backgroundColor: '#ffffff',
+    borderWidth: 1,
+    borderColor: '#d1d5db',
+    borderRadius: 8,
+    marginTop: 4,
+    maxHeight: 200,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 4,
+    elevation: 3,
+  },
+  suggestionItem: {
+    padding: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: '#f3f4f6',
+  },
+  suggestionText: {
+    fontSize: 16,
+    color: '#111827',
+    fontWeight: '600',
+  },
+  suggestionDetails: {
+    fontSize: 14,
+    color: '#6b7280',
+    marginTop: 2,
   },
 });

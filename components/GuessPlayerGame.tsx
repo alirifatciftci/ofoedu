@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import {
   View,
   Text,
@@ -7,21 +7,28 @@ import {
   StyleSheet,
   ActivityIndicator,
   ScrollView,
+  KeyboardAvoidingView,
+  Platform,
+  FlatList,
 } from 'react-native';
 import { supabase } from '@/lib/supabase';
-import {
-  GuessPlayerGame as GuessPlayerGameType,
-  PlayerCareerHistory,
-} from '@/types/database';
-import { Eye, EyeOff, CheckCircle, XCircle } from 'lucide-react-native';
+import { compareTurkish, startsWithTurkish } from '@/lib/utils';
+import { Eye, EyeOff, CheckCircle, XCircle, RefreshCw } from 'lucide-react-native';
 
-interface CareerStep extends PlayerCareerHistory {
+interface CareerStep {
+  id: string;
+  year_from: number;
+  year_to: number | null;
   clubs: { name: string; country: string };
+}
+
+interface Player {
+  id: string;
+  name: string;
 }
 
 export default function GuessPlayerGame() {
   const [loading, setLoading] = useState(true);
-  const [game, setGame] = useState<GuessPlayerGameType | null>(null);
   const [careerHistory, setCareerHistory] = useState<CareerStep[]>([]);
   const [revealedSteps, setRevealedSteps] = useState<number[]>([0]);
   const [guess, setGuess] = useState('');
@@ -30,38 +37,127 @@ export default function GuessPlayerGame() {
     'playing'
   );
   const [playerName, setPlayerName] = useState('');
+  const [currentPlayerId, setCurrentPlayerId] = useState<string | null>(null);
+  const [allPlayers, setAllPlayers] = useState<Player[]>([]);
+  const [suggestions, setSuggestions] = useState<Player[]>([]);
+  const scrollViewRef = useRef<ScrollView>(null);
+  const inputRef = useRef<TextInput>(null);
 
   useEffect(() => {
     loadGame();
+    loadAllPlayers();
   }, []);
 
-  async function loadGame() {
+  async function loadAllPlayers() {
+    try {
+      const { data: playersWithHistory } = await supabase
+        .from('player_career_history')
+        .select('player_id')
+        .limit(10000);
+
+      if (!playersWithHistory) return;
+
+      const uniquePlayerIds = [
+        ...new Set(playersWithHistory.map((h) => h.player_id)),
+      ];
+
+      const { data: players } = await supabase
+        .from('players')
+        .select('id, name')
+        .in('id', uniquePlayerIds);
+
+      if (players) {
+        setAllPlayers(players);
+      }
+    } catch (error) {
+      console.error('Error loading all players:', error);
+    }
+  }
+
+  function handleGuessChange(text: string) {
+    setGuess(text);
+    
+    if (text.trim().length > 0) {
+      const filtered = allPlayers.filter((player) =>
+        startsWithTurkish(player.name, text.trim())
+      );
+      setSuggestions(filtered.slice(0, 5)); // İlk 5 öneri
+    } else {
+      setSuggestions([]);
+    }
+  }
+
+  function selectSuggestion(playerName: string) {
+    setGuess(playerName);
+    setSuggestions([]);
+    inputRef.current?.blur();
+  }
+
+  async function loadGame(excludePlayerId: string | null = null) {
     try {
       setLoading(true);
 
-      const { data: games, error: gamesError } = await supabase
-        .from('guess_player_games')
-        .select('*, players(*)')
-        .eq('is_active', true)
-        .limit(1)
-        .maybeSingle();
+      // Kariyer geçmişi olan tüm oyuncuları çek
+      // Önce kariyer geçmişi olan oyuncu ID'lerini bul
+      const { data: playersWithHistory, error: historyError } = await supabase
+        .from('player_career_history')
+        .select('player_id')
+        .limit(10000); // Tüm kayıtları çek
 
-      if (gamesError) throw gamesError;
-      if (!games) {
+      if (historyError) throw historyError;
+      if (!playersWithHistory || playersWithHistory.length === 0) {
         setLoading(false);
         return;
       }
 
-      setGame(games);
-      setPlayerName(games.players?.name || '');
+      // Benzersiz oyuncu ID'lerini al
+      const uniquePlayerIds = [
+        ...new Set(playersWithHistory.map((h) => h.player_id)),
+      ];
 
-      const { data: history, error: historyError } = await supabase
+      // Mevcut oyuncuyu hariç tut
+      let availablePlayerIds = uniquePlayerIds;
+      if (excludePlayerId && uniquePlayerIds.length > 1) {
+        availablePlayerIds = uniquePlayerIds.filter(
+          (id) => id !== excludePlayerId
+        );
+      }
+
+      if (availablePlayerIds.length === 0) {
+        setLoading(false);
+        return;
+      }
+
+      // Rastgele bir oyuncu seç
+      const randomIndex = Math.floor(
+        Math.random() * availablePlayerIds.length
+      );
+      const selectedPlayerId = availablePlayerIds[randomIndex];
+
+      // Seçilen oyuncunun bilgilerini çek
+      const { data: player, error: playerError } = await supabase
+        .from('players')
+        .select('id, name')
+        .eq('id', selectedPlayerId)
+        .maybeSingle();
+
+      if (playerError) throw playerError;
+      if (!player) {
+        setLoading(false);
+        return;
+      }
+
+      setCurrentPlayerId(player.id);
+      setPlayerName(player.name || '');
+
+      // Seçilen oyuncunun kariyer geçmişini çek
+      const { data: history, error: historyError2 } = await supabase
         .from('player_career_history')
         .select('*, clubs(name, country)')
-        .eq('player_id', games.player_id)
+        .eq('player_id', selectedPlayerId)
         .order('year_from', { ascending: true });
 
-      if (historyError) throw historyError;
+      if (historyError2) throw historyError2;
 
       setCareerHistory((history as CareerStep[]) || []);
       setLoading(false);
@@ -71,6 +167,14 @@ export default function GuessPlayerGame() {
     }
   }
 
+  function changePlayer() {
+    setRevealedSteps([0]);
+    setGuess('');
+    setAttempts(0);
+    setGameState('playing');
+    loadGame(currentPlayerId);
+  }
+
   function revealNextClue() {
     if (revealedSteps.length < careerHistory.length) {
       setRevealedSteps([...revealedSteps, revealedSteps.length]);
@@ -78,12 +182,11 @@ export default function GuessPlayerGame() {
   }
 
   function checkGuess() {
-    const normalizedGuess = guess.trim().toLowerCase();
-    const normalizedAnswer = playerName.toLowerCase();
-
+    setSuggestions([]);
     setAttempts(attempts + 1);
 
-    if (normalizedGuess === normalizedAnswer) {
+    // Türkçe karakter toleransı ile karşılaştır
+    if (compareTurkish(guess.trim(), playerName)) {
       setGameState('won');
       saveStats(true);
     } else if (attempts >= 4) {
@@ -97,7 +200,7 @@ export default function GuessPlayerGame() {
   }
 
   async function saveStats(won: boolean) {
-    if (!game) return;
+    if (!playerName) return;
 
     try {
       const score = won ? Math.max(0, 100 - attempts * 15) : 0;
@@ -105,7 +208,7 @@ export default function GuessPlayerGame() {
       await supabase.from('user_game_stats').insert({
         user_id: 'anonymous',
         game_type: 'guess_player',
-        game_id: game.id,
+        game_id: playerName,
         completed: won,
         attempts: attempts + 1,
         score: score,
@@ -120,7 +223,14 @@ export default function GuessPlayerGame() {
     setGuess('');
     setAttempts(0);
     setGameState('playing');
-    loadGame();
+    loadGame(currentPlayerId);
+  }
+
+  function handleInputFocus() {
+    // Input focus olduğunda scroll yap
+    setTimeout(() => {
+      scrollViewRef.current?.scrollToEnd({ animated: true });
+    }, 100);
   }
 
   if (loading) {
@@ -131,7 +241,7 @@ export default function GuessPlayerGame() {
     );
   }
 
-  if (!game || careerHistory.length === 0) {
+  if (careerHistory.length === 0) {
     return (
       <View style={styles.centerContainer}>
         <Text style={styles.errorText}>No games available</Text>
@@ -140,11 +250,29 @@ export default function GuessPlayerGame() {
   }
 
   return (
-    <ScrollView style={styles.container}>
-      <View style={styles.header}>
-        <Text style={styles.title}>Guess The Player</Text>
-        <Text style={styles.subtitle}>Career Mode</Text>
-      </View>
+    <KeyboardAvoidingView
+      style={styles.container}
+      behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+      keyboardVerticalOffset={Platform.OS === 'ios' ? 0 : 20}>
+      <ScrollView
+        ref={scrollViewRef}
+        style={styles.scrollView}
+        contentContainerStyle={styles.scrollContent}
+        keyboardShouldPersistTaps="handled">
+        <View style={styles.header}>
+          <View style={styles.headerTop}>
+            <Text style={styles.title}>Guess The Player</Text>
+            {gameState === 'playing' && (
+              <TouchableOpacity
+                style={styles.changePlayerButton}
+                onPress={changePlayer}>
+                <RefreshCw size={20} color="#3b82f6" />
+                <Text style={styles.changePlayerText}>Change Player</Text>
+              </TouchableOpacity>
+            )}
+          </View>
+          <Text style={styles.subtitle}>Career Mode</Text>
+        </View>
 
       <View style={styles.attemptsContainer}>
         <Text style={styles.attemptsText}>
@@ -189,14 +317,37 @@ export default function GuessPlayerGame() {
             </TouchableOpacity>
           )}
 
-          <TextInput
-            style={styles.input}
-            placeholder="Enter player name..."
-            value={guess}
-            onChangeText={setGuess}
-            autoCapitalize="words"
-            autoCorrect={false}
-          />
+          <View>
+            <TextInput
+              ref={inputRef}
+              style={styles.input}
+              placeholder="Enter player name..."
+              value={guess}
+              onChangeText={handleGuessChange}
+              autoCapitalize="words"
+              autoCorrect={false}
+              onFocus={handleInputFocus}
+              returnKeyType="done"
+              onSubmitEditing={checkGuess}
+            />
+            
+            {suggestions.length > 0 && (
+              <View style={styles.suggestionsContainer}>
+                <FlatList
+                  data={suggestions}
+                  keyExtractor={(item) => item.id}
+                  renderItem={({ item }) => (
+                    <TouchableOpacity
+                      style={styles.suggestionItem}
+                      onPress={() => selectSuggestion(item.name)}>
+                      <Text style={styles.suggestionText}>{item.name}</Text>
+                    </TouchableOpacity>
+                  )}
+                  scrollEnabled={false}
+                />
+              </View>
+            )}
+          </View>
 
           <TouchableOpacity
             style={[
@@ -238,7 +389,8 @@ export default function GuessPlayerGame() {
           </TouchableOpacity>
         </View>
       )}
-    </ScrollView>
+      </ScrollView>
+    </KeyboardAvoidingView>
   );
 }
 
@@ -246,6 +398,12 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
     backgroundColor: '#f9fafb',
+  },
+  scrollView: {
+    flex: 1,
+  },
+  scrollContent: {
+    flexGrow: 1,
   },
   centerContainer: {
     flex: 1,
@@ -258,6 +416,26 @@ const styles = StyleSheet.create({
     padding: 24,
     borderBottomWidth: 1,
     borderBottomColor: '#e5e7eb',
+  },
+  headerTop: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 4,
+  },
+  changePlayerButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#eff6ff',
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 6,
+    gap: 6,
+  },
+  changePlayerText: {
+    color: '#3b82f6',
+    fontSize: 14,
+    fontWeight: '600',
   },
   title: {
     fontSize: 28,
@@ -408,5 +586,27 @@ const styles = StyleSheet.create({
   errorText: {
     fontSize: 16,
     color: '#6b7280',
+  },
+  suggestionsContainer: {
+    backgroundColor: '#ffffff',
+    borderWidth: 1,
+    borderColor: '#d1d5db',
+    borderRadius: 8,
+    marginTop: 4,
+    maxHeight: 200,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 4,
+    elevation: 3,
+  },
+  suggestionItem: {
+    padding: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: '#f3f4f6',
+  },
+  suggestionText: {
+    fontSize: 16,
+    color: '#111827',
   },
 });
