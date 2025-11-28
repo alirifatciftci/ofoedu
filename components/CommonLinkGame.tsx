@@ -38,6 +38,7 @@ export default function CommonLinkGame() {
   const [attempts, setAttempts] = useState(0);
   const [message, setMessage] = useState('');
   const [suggestions, setSuggestions] = useState<PlayerWithClubs[]>([]);
+  const [allPlayers, setAllPlayers] = useState<PlayerWithClubs[]>([]);
   const [currentClubPair, setCurrentClubPair] = useState<{
     club1Id: string;
     club2Id: string;
@@ -47,7 +48,41 @@ export default function CommonLinkGame() {
 
   useEffect(() => {
     loadGame();
+    loadAllPlayers();
   }, []);
+
+  // allPlayers yüklendikten sonra, eğer kullanıcı bir şey yazmışsa suggestions'ı güncelle
+  useEffect(() => {
+    if (guess.trim().length > 0 && allPlayers.length > 0) {
+      handleGuessChange(guess);
+    }
+  }, [allPlayers]);
+
+  async function loadAllPlayers() {
+    try {
+      const { data: playersWithHistory } = await supabase
+        .from('player_career_history')
+        .select('player_id')
+        .limit(10000);
+
+      if (!playersWithHistory) return;
+
+      const uniquePlayerIds = [
+        ...new Set(playersWithHistory.map((h) => h.player_id)),
+      ];
+
+      const { data: players } = await supabase
+        .from('players')
+        .select('id, name, position, nationality')
+        .in('id', uniquePlayerIds);
+
+      if (players) {
+        setAllPlayers(players as PlayerWithClubs[]);
+      }
+    } catch (error) {
+      console.error('Error loading all players:', error);
+    }
+  }
 
   async function loadGame(excludeClubPair: { club1Id: string; club2Id: string } | null = null) {
     try {
@@ -96,8 +131,13 @@ export default function CommonLinkGame() {
           const club1 = allClubs[i];
           const club2 = allClubs[j];
 
-          // Aynı kulübün kendisiyle eşleşmesini engelle
+          // Aynı kulübün kendisiyle eşleşmesini engelle - ID kontrolü
           if (club1.id === club2.id) {
+            continue;
+          }
+
+          // Aynı kulüp adına sahip farklı ID'leri de engelle
+          if (club1.name.toLowerCase().trim() === club2.name.toLowerCase().trim()) {
             continue;
           }
 
@@ -200,9 +240,27 @@ export default function CommonLinkGame() {
     setGuess(text);
     
     if (text.trim().length > 0) {
-      const filtered = validPlayers.filter((player) =>
-        startsWithTurkish(player.name, text.trim())
-      );
+      // Eğer allPlayers yüklenmişse, tüm oyuncular arasından filtrele
+      // Değilse, validPlayers içinde arama yap
+      let filtered: PlayerWithClubs[] = [];
+      
+      if (allPlayers.length > 0) {
+        // Tüm oyuncular arasından filtrele (players tablosundan)
+        filtered = allPlayers.filter((player) =>
+          startsWithTurkish(player.name, text.trim())
+        );
+        
+        // Sadece validPlayers içindekileri göster (doğru cevaplar)
+        filtered = filtered.filter((player) =>
+          validPlayers.some((vp) => vp.id === player.id)
+        );
+      } else if (validPlayers.length > 0) {
+        // allPlayers henüz yüklenmemişse, validPlayers içinde arama yap
+        filtered = validPlayers.filter((player) =>
+          startsWithTurkish(player.name, text.trim())
+        );
+      }
+      
       setSuggestions(filtered.slice(0, 5)); // İlk 5 öneri
     } else {
       setSuggestions([]);

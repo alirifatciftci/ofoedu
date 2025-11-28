@@ -19,6 +19,7 @@ interface CareerStep {
   id: string;
   year_from: number;
   year_to: number | null;
+  club_id: string;
   clubs: { name: string; country: string };
 }
 
@@ -159,7 +160,26 @@ export default function GuessPlayerGame() {
 
       if (historyError2) throw historyError2;
 
-      setCareerHistory((history as CareerStep[]) || []);
+      // Aynı kulüpte birden fazla dönem oynayan oyuncular için tekrar eden clue'ları kaldır
+      // Her benzersiz kulüp için sadece bir clue göster (ilk dönem)
+      // Kulüp adına göre filtrele (aynı kulüp adı = aynı kulüp, farklı club_id olsa bile)
+      const uniqueClubsMap = new Map<string, CareerStep>();
+      if (history) {
+        history.forEach((step: CareerStep) => {
+          const clubName = step.clubs.name.toLowerCase().trim();
+          // Eğer bu kulüp adı daha önce eklenmemişse ekle
+          if (!uniqueClubsMap.has(clubName)) {
+            uniqueClubsMap.set(clubName, step);
+          }
+        });
+      }
+
+      // Benzersiz kulüpleri yıl sırasına göre sırala
+      const uniqueCareerHistory = Array.from(uniqueClubsMap.values()).sort(
+        (a, b) => a.year_from - b.year_from
+      );
+
+      setCareerHistory(uniqueCareerHistory);
       setLoading(false);
     } catch (error) {
       console.error('Error loading game:', error);
